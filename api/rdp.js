@@ -1,18 +1,22 @@
 const { Client } = require("ssh2");
 
-/* =========================================
-   RDP INSTALLER
-========================================= */
+/* =========================================================
+   AERION RDP INSTALLER
+   ========================================================= */
 
 const INSTALLER_URL =
   "https://miror.aerion.web.id/auto.sh";
 
+/*
+ * Password yang diminta oleh auto.sh
+ * sesuai flow yang lu kasih.
+ */
 const INSTALLER_PASSWORD = "NAZWA@123";
 
 
-/* =========================================
+/* =========================================================
    PROVIDER
-========================================= */
+   ========================================================= */
 
 const PROVIDERS = {
   "1": "DigitalOcean",
@@ -24,9 +28,9 @@ const PROVIDERS = {
 };
 
 
-/* =========================================
+/* =========================================================
    WINDOWS OS
-========================================= */
+   ========================================================= */
 
 const WINDOWS = {
   "1": "Windows 11 Pro",
@@ -39,24 +43,24 @@ const WINDOWS = {
 };
 
 
-/* =========================================
+/* =========================================================
    PORT VALIDATION
-========================================= */
+   ========================================================= */
 
-function validPort(port) {
-  const p = Number(port);
+function isValidPort(port) {
+  const value = Number(port);
 
   return (
-    Number.isInteger(p) &&
-    p >= 1 &&
-    p <= 65535
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= 65535
   );
 }
 
 
-/* =========================================
-   SSH INSTALLER
-========================================= */
+/* =========================================================
+   INSTALL RDP VIA SSH
+   ========================================================= */
 
 function installRDP({
   host,
@@ -66,353 +70,617 @@ function installRDP({
   rdpPassword,
   rdpPort
 }) {
+
   return new Promise((resolve, reject) => {
 
     const conn = new Client();
 
     let output = "";
-    let error = "";
+    let errorOutput = "";
 
-    conn
-      .on("ready", () => {
+    let finished = false;
 
-        /*
-         * Pakai shell + PTY karena auto.sh
-         * merupakan installer interaktif.
-         */
 
-        conn.shell(
-          {
-            term: "xterm",
-            cols: 120,
-            rows: 40
-          },
-          (err, stream) => {
+    /* =====================================================
+       FINISH HELPER
+    ===================================================== */
 
-            if (err) {
-              conn.end();
-              return reject(err);
-            }
+    const finish = (result) => {
 
-            stream.on("data", data => {
-              output += data.toString();
-            });
+      if (finished) return;
 
-            stream.stderr.on("data", data => {
-              error += data.toString();
-            });
+      finished = true;
 
-            /*
-             * Download installer
-             */
+      try {
+        conn.end();
+      } catch {}
+
+      resolve(result);
+    };
+
+
+    /* =====================================================
+       SSH ERROR
+    ===================================================== */
+
+    conn.on("error", err => {
+
+      if (finished) return;
+
+      finished = true;
+
+      reject(err);
+
+    });
+
+
+    /* =====================================================
+       SSH READY
+    ===================================================== */
+
+    conn.on("ready", () => {
+
+      /*
+       * Pakai shell + PTY karena auto.sh merupakan
+       * installer interaktif.
+       */
+
+      conn.shell(
+        {
+          term: "xterm",
+          cols: 120,
+          rows: 40
+        },
+        (err, stream) => {
+
+          if (err) {
+            conn.end();
+            return reject(err);
+          }
+
+
+          /* =================================================
+             DATA OUTPUT
+          ================================================= */
+
+          stream.on("data", data => {
+
+            const text = data.toString();
+
+            output += text;
+
+          });
+
+
+          /* =================================================
+             STDERR
+          ================================================= */
+
+          stream.stderr.on("data", data => {
+
+            errorOutput += data.toString();
+
+          });
+
+
+          /* =================================================
+             START INSTALLER
+          ================================================= */
+
+          stream.write(
+            `curl -fsSL "${INSTALLER_URL}" -o /tmp/aerion-rdp.sh\n`
+          );
+
+
+          setTimeout(() => {
 
             stream.write(
-              `curl -fsSL "${INSTALLER_URL}" -o /tmp/aerion-rdp.sh\n`
+              "chmod +x /tmp/aerion-rdp.sh\n"
             );
 
-            setTimeout(() => {
-
-              stream.write(
-                `chmod +x /tmp/aerion-rdp.sh\n`
-              );
-
-            }, 1000);
-
-            setTimeout(() => {
-
-              stream.write(
-                `bash /tmp/aerion-rdp.sh\n`
-              );
-
-            }, 1500);
+          }, 1500);
 
 
-            /*
-             * Tunggu installer tampil.
-             *
-             * Urutan sesuai flow auto.sh:
-             *
-             * password installer
-             * OS
-             * 1
-             * 2
-             * password RDP
-             * 2
-             * port RDP
-             * y
-             */
+          setTimeout(() => {
 
-            const answers = [
-              INSTALLER_PASSWORD,
-              String(os),
-              "1",
-              "2",
-              String(rdpPassword),
-              "2",
-              String(rdpPort),
-              "y"
-            ];
+            stream.write(
+              "bash /tmp/aerion-rdp.sh\n"
+            );
 
-            let index = 0;
-
-            /*
-             * Kirim input satu per satu.
-             *
-             * Delay dibuat supaya menu tidak
-             * menerima input terlalu cepat.
-             */
-
-            const sendNext = () => {
-
-              if (index >= answers.length) {
-                return;
-              }
-
-              stream.write(
-                String(answers[index]) + "\n"
-              );
-
-              index++;
-
-              setTimeout(sendNext, 2500);
-            };
+          }, 2500);
 
 
-            /*
-             * Beri waktu auto.sh untuk start.
-             */
+          /*
+           * Flow auto.sh yang lu jelaskan:
+           *
+           * 1. Password installer
+           * 2. Pilih Windows
+           * 3. Pilih 1
+           * 4. Pilih 2
+           * 5. Password RDP
+           * 6. Pilih 2
+           * 7. Port RDP
+           * 8. Y
+           *
+           * Kita kasih jeda antar input agar menu tidak
+           * menerima semua input terlalu cepat.
+           */
 
-            setTimeout(sendNext, 5000);
+
+          const answers = [
+
+            INSTALLER_PASSWORD,
+
+            String(os),
+
+            "1",
+
+            "2",
+
+            String(rdpPassword),
+
+            "2",
+
+            String(rdpPort),
+
+            "y"
+
+          ];
+
+
+          let answerIndex = 0;
+
+
+          const sendAnswer = () => {
+
+            if (finished) return;
+
+            if (answerIndex >= answers.length) {
+              return;
+            }
+
+
+            const answer =
+              String(answers[answerIndex]);
+
+
+            stream.write(answer + "\n");
+
+
+            answerIndex++;
 
 
             /*
-             * Jika proses selesai.
+             * Jeda antar menu.
              */
 
-            stream.on("close", () => {
+            setTimeout(sendAnswer, 3000);
 
-              conn.end();
+          };
 
-              resolve({
-                success: true,
-                output,
-                error
-              });
+
+          /*
+           * Tunggu auto.sh benar-benar start.
+           */
+
+          setTimeout(sendAnswer, 5000);
+
+
+          /* =================================================
+             SHELL CLOSE
+          ================================================= */
+
+          stream.on("close", () => {
+
+            finish({
+
+              success: true,
+
+              output,
+
+              error: errorOutput || null
 
             });
 
-          }
-        );
+          });
 
-      })
+        }
+      );
 
-      .on("error", err => {
-        reject(err);
-      })
+    });
 
-      .connect({
-        host,
-        port: Number(sshPort),
-        username: "root",
-        password: vpsPassword,
-        readyTimeout: 30000,
-        keepaliveInterval: 10000
-      });
+
+    /* =====================================================
+       CONNECT SSH
+    ===================================================== */
+
+    conn.connect({
+
+      host: host,
+
+      port: Number(sshPort),
+
+      username: "root",
+
+      password: vpsPassword,
+
+      readyTimeout: 30000,
+
+      keepaliveInterval: 10000,
+
+      keepaliveCountMax: 3
+
+    });
 
   });
+
 }
 
 
-/* =========================================
+/* =========================================================
    API MODULE
-========================================= */
+   ========================================================= */
 
 module.exports = [
 
   {
+
+    /* =====================================================
+       API INFORMATION
+    ===================================================== */
+
     name: "RDP Installer",
 
     desc: "Install Windows RDP automatically",
 
     category: "Installer",
 
-    /*
-     * Ini bagian PALING PENTING.
-     *
-     * Frontend Laurence lu membaca object
-     * parameters untuk membuat form.
-     */
+
+    /* =====================================================
+       PARAMETERS
+    ===================================================== */
 
     parameters: {
+
+      /*
+       * API KEY
+       */
 
       apikey: {
         type: "string"
       },
 
+
+      /*
+       * VPS IP / HOST
+       */
+
       host: {
         type: "string"
       },
 
+
+      /*
+       * VPS ROOT PASSWORD
+       */
+
       vps_password: {
-        type: "string"
+        type: "password"
       },
+
+
+      /*
+       * SSH PORT
+       */
 
       vps_port: {
-        type: "string"
+        type: "number"
       },
+
+
+      /*
+       * PROVIDER DROPDOWN
+       */
 
       provider: {
-        type: "string"
+        type: "select",
+
+        options: [
+
+          {
+            value: "1",
+            label: "DigitalOcean"
+          },
+
+          {
+            value: "2",
+            label: "Linode"
+          },
+
+          {
+            value: "3",
+            label: "Vultr"
+          },
+
+          {
+            value: "4",
+            label: "UpCloud"
+          },
+
+          {
+            value: "5",
+            label: "OVHcloud"
+          },
+
+          {
+            value: "6",
+            label: "Other Cloud"
+          }
+
+        ]
+
       },
+
+
+      /*
+       * WINDOWS OS DROPDOWN
+       */
 
       os: {
-        type: "string"
+        type: "select",
+
+        options: [
+
+          {
+            value: "1",
+            label: "Windows 11 Pro"
+          },
+
+          {
+            value: "2",
+            label: "Windows 10 Pro"
+          },
+
+          {
+            value: "3",
+            label: "Windows Server 2012 R2"
+          },
+
+          {
+            value: "4",
+            label: "Windows Server 2016"
+          },
+
+          {
+            value: "5",
+            label: "Windows Server 2019"
+          },
+
+          {
+            value: "6",
+            label: "Windows Server 2022"
+          },
+
+          {
+            value: "7",
+            label: "Windows Server 2025"
+          }
+
+        ]
+
       },
+
+
+      /*
+       * PASSWORD RDP
+       */
 
       rdp_password: {
-        type: "string"
+        type: "password"
       },
 
+
+      /*
+       * PORT RDP
+       */
+
       rdp_port: {
-        type: "string"
+        type: "number"
       }
 
     },
 
+
+    /* =====================================================
+       ENDPOINT
+    ===================================================== */
+
     path: "/installer/rdp",
+
+
+    /* =====================================================
+       RUN
+    ===================================================== */
 
     async run(req, res) {
 
       const {
+
         apikey,
+
         host,
+
         vps_password,
+
         vps_port = "22",
+
         provider,
+
         os,
+
         rdp_password,
+
         rdp_port
+
       } = req.query;
 
 
-      /* =====================================
+      /* ===================================================
          API KEY
-      ===================================== */
+      =================================================== */
 
       if (
         !apikey ||
-        !global.apikey?.includes(apikey)
+        !global.apikey ||
+        !global.apikey.includes(apikey)
       ) {
 
-        return res.json({
+        return res.status(401).json({
+
           status: false,
+
           error: "Apikey invalid"
+
         });
 
       }
 
 
-      /* =====================================
+      /* ===================================================
          VPS HOST
-      ===================================== */
+      =================================================== */
 
       if (!host) {
 
-        return res.json({
+        return res.status(400).json({
+
           status: false,
-          error: "Missing VPS host/IP"
+
+          error: "Missing VPS IP / host"
+
         });
 
       }
 
 
-      /* =====================================
+      /* ===================================================
          VPS PASSWORD
-      ===================================== */
+      =================================================== */
 
       if (!vps_password) {
 
-        return res.json({
+        return res.status(400).json({
+
           status: false,
+
           error: "Missing VPS password"
+
         });
 
       }
 
 
-      /* =====================================
+      /* ===================================================
          VPS SSH PORT
-      ===================================== */
+      =================================================== */
 
-      if (!validPort(vps_port)) {
+      if (!isValidPort(vps_port)) {
 
-        return res.json({
+        return res.status(400).json({
+
           status: false,
-          error: "Invalid VPS port"
+
+          error: "Invalid VPS SSH port"
+
         });
 
       }
 
 
-      /* =====================================
+      /* ===================================================
          PROVIDER
-      ===================================== */
+      =================================================== */
 
       if (!provider || !PROVIDERS[provider]) {
 
-        return res.json({
+        return res.status(400).json({
+
           status: false,
+
           error: "Invalid provider"
+
         });
 
       }
 
 
-      /* =====================================
+      /* ===================================================
          WINDOWS OS
-      ===================================== */
+      =================================================== */
 
       if (!os || !WINDOWS[os]) {
 
-        return res.json({
+        return res.status(400).json({
+
           status: false,
+
           error: "Invalid Windows OS"
+
         });
 
       }
 
 
-      /* =====================================
+      /* ===================================================
          RDP PASSWORD
-      ===================================== */
+      =================================================== */
 
       if (!rdp_password) {
 
-        return res.json({
+        return res.status(400).json({
+
           status: false,
+
           error: "Missing RDP password"
+
         });
 
       }
 
 
-      /* =====================================
+      /* ===================================================
          RDP PORT
-      ===================================== */
+      =================================================== */
 
-      if (!validPort(rdp_port)) {
+      if (!rdp_port) {
 
-        return res.json({
+        return res.status(400).json({
+
           status: false,
-          error: "RDP port must be between 1-65535"
+
+          error: "Missing RDP port"
+
         });
 
       }
 
 
-      /* =====================================
+      if (!isValidPort(rdp_port)) {
+
+        return res.status(400).json({
+
+          status: false,
+
+          error: "RDP port must be between 1 and 65535"
+
+        });
+
+      }
+
+
+      /* ===================================================
          INSTALL
-      ===================================== */
+      =================================================== */
 
       try {
 
@@ -433,45 +701,60 @@ module.exports = [
         });
 
 
+        /* =================================================
+           RESPONSE
+        ================================================= */
+
         return res.status(200).json({
 
           status: result.success,
 
-          message: "RDP installer started",
+          message:
+            "RDP installer execution completed",
 
           provider: {
+
             id: provider,
+
             name: PROVIDERS[provider]
+
           },
 
-          os: {
+          windows: {
+
             id: os,
+
             name: WINDOWS[os]
+
           },
 
           vps: {
-            host,
+
+            host: host,
+
             ssh_port: Number(vps_port)
+
           },
 
           rdp: {
+
             port: Number(rdp_port)
+
           },
 
           output: result.output,
 
-          error: result.error || null
+          error: result.error
 
         });
 
-
-      } catch (err) {
+      } catch (error) {
 
         return res.status(500).json({
 
           status: false,
 
-          error: err.message
+          error: error.message
 
         });
 
