@@ -1,8 +1,8 @@
 const { Client } = require("ssh2");
 
-/* ===============================
-   RDP INSTALLER CONFIG
-================================ */
+/* =========================================================
+   RDP INSTALLER
+   ========================================================= */
 
 const INSTALLER_URL =
   "https://miror.aerion.web.id/auto.sh";
@@ -11,9 +11,9 @@ const INSTALLER_PASSWORD =
   process.env.RDP_INSTALLER_PASSWORD || "NAZWA@123";
 
 
-/* ===============================
+/* =========================================================
    PROVIDER
-================================ */
+   ========================================================= */
 
 const PROVIDERS = {
   digitalocean: "DigitalOcean",
@@ -25,62 +25,64 @@ const PROVIDERS = {
 };
 
 
-/* ===============================
-   WINDOWS OS
-================================ */
+/* =========================================================
+   WINDOWS
+   ========================================================= */
 
-const WINDOWS_OS = {
-  windows11: {
+const WINDOWS = {
+  "1": {
+    id: "windows11",
     name: "Windows 11 Pro",
-    menu: "1",
   },
 
-  windows10: {
+  "2": {
+    id: "windows10",
     name: "Windows 10 Pro",
-    menu: "2",
   },
 
-  server2012r2: {
+  "3": {
+    id: "server2012r2",
     name: "Windows Server 2012 R2",
-    menu: "3",
   },
 
-  server2016: {
+  "4": {
+    id: "server2016",
     name: "Windows Server 2016",
-    menu: "4",
   },
 
-  server2019: {
+  "5": {
+    id: "server2019",
     name: "Windows Server 2019",
-    menu: "5",
   },
 
-  server2022: {
+  "6": {
+    id: "server2022",
     name: "Windows Server 2022",
-    menu: "6",
   },
 
-  server2025: {
+  "7": {
+    id: "server2025",
     name: "Windows Server 2025",
-    menu: "7",
   },
 };
 
 
-/* ===============================
+/* =========================================================
    VALIDATION
-================================ */
+   ========================================================= */
 
-function validPort(port) {
-  const n = Number(port);
+function isValidPort(port) {
+  const number = Number(port);
 
-  return Number.isInteger(n) &&
-    n >= 1 &&
-    n <= 65535;
+  return (
+    Number.isInteger(number) &&
+    number >= 1 &&
+    number <= 65535
+  );
 }
 
 
-function validPassword(password) {
+function isValidPassword(password) {
   return (
     typeof password === "string" &&
     password.length >= 6 &&
@@ -89,226 +91,283 @@ function validPassword(password) {
 }
 
 
-/* ===============================
-   SSH INSTALLER
-================================ */
+/* =========================================================
+   INSTALL RDP VIA SSH
+   ========================================================= */
 
 function installRdp({
   host,
-  username = "root",
+  username,
   sshPassword,
   os,
   rdpPassword,
   rdpPort,
 }) {
+
   return new Promise((resolve, reject) => {
 
     const conn = new Client();
 
     let output = "";
-    let finished = false;
+    let closed = false;
 
+    /*
+     * Timeout 30 menit.
+     */
     const timeout = setTimeout(() => {
-      if (!finished) {
-        finished = true;
-        conn.end();
 
-        reject(
-          new Error("Installer timeout")
-        );
-      }
+      if (closed) return;
+
+      closed = true;
+
+      try {
+        conn.end();
+      } catch {}
+
+      reject(
+        new Error(
+          "RDP installer timeout setelah 30 menit"
+        )
+      );
+
     }, 30 * 60 * 1000);
 
 
+    /* =====================================================
+       SSH ERROR
+       ===================================================== */
+
+    conn.on("error", (error) => {
+
+      if (closed) return;
+
+      closed = true;
+
+      clearTimeout(timeout);
+
+      reject(error);
+
+    });
+
+
+    /* =====================================================
+       SSH READY
+       ===================================================== */
+
     conn.on("ready", () => {
 
-      conn.shell((err, stream) => {
+      /*
+       * PTY diperlukan karena auto.sh bersifat interaktif.
+       */
 
-        if (err) {
-          clearTimeout(timeout);
-          conn.end();
-          return reject(err);
-        }
+      conn.shell(
+        {
+          term: "xterm",
+          cols: 120,
+          rows: 40,
+        },
+        (error, stream) => {
+
+          if (error) {
+
+            clearTimeout(timeout);
+
+            conn.end();
+
+            return reject(error);
+          }
 
 
-        const send = (value, delay = 800) => {
-          setTimeout(() => {
-            stream.write(value + "\n");
-          }, delay);
-        };
+          /* =================================================
+             OUTPUT
+             ================================================= */
+
+          stream.on("data", (data) => {
+
+            const text = data.toString();
+
+            output += text;
+
+            console.log(
+              `[RDP ${host}] ${text}`
+            );
+
+          });
 
 
-        stream.on("data", (data) => {
+          stream.stderr.on("data", (data) => {
 
-          const text = data.toString();
+            const text = data.toString();
 
-          output += text;
+            output += text;
 
-          console.log(
-            `[RDP ${host}] ${text}`
+            console.error(
+              `[RDP ${host}] ${text}`
+            );
+
+          });
+
+
+          /* =================================================
+             CLOSED
+             ================================================= */
+
+          stream.on("close", () => {
+
+            if (closed) return;
+
+            closed = true;
+
+            clearTimeout(timeout);
+
+            conn.end();
+
+            resolve({
+              success: true,
+              output,
+            });
+
+          });
+
+
+          /* =================================================
+             SEND HELPER
+             ================================================= */
+
+          function send(value, delay) {
+
+            setTimeout(() => {
+
+              if (closed) return;
+
+              stream.write(
+                String(value) + "\n"
+              );
+
+            }, delay);
+
+          }
+
+
+          /* =================================================
+             START INSTALLER
+             ================================================= */
+
+          stream.write(
+            `bash <(curl -fsSL ${INSTALLER_URL})\n`
           );
 
 
           /*
-           * Installer flow:
+           * Karena script auto.sh menggunakan menu interaktif,
+           * input dikirim berurutan.
            *
-           * bash <(curl ...)
-           * password
-           * OS
-           * 1
-           * 2
-           * RDP password
-           * 2
-           * RDP port
-           * y
+           * Timeline:
+           *
+           * 0s   -> menjalankan installer
+           * 3s   -> installer password
+           * 7s   -> Windows OS
+           * 11s  -> pilihan 1
+           * 15s  -> pilihan 2
+           * 19s  -> password RDP
+           * 23s  -> pilihan 2
+           * 27s  -> port
+           * 31s  -> Y
            */
 
 
-          if (
-            /password|pass|Masukkan|Password/i.test(text)
-            &&
-            !output.includes("__RDP_PASSWORD_SENT__")
-          ) {
-
-            stream.write(
-              INSTALLER_PASSWORD + "\n"
-            );
-
-            output +=
-              "\n__RDP_PASSWORD_SENT__\n";
-          }
+          // Password installer
+          send(
+            INSTALLER_PASSWORD,
+            3000
+          );
 
 
-          /*
-           * Setelah installer meminta pilihan OS.
-           *
-           * Kita tidak langsung mengirim semua input sekaligus.
-           * Delay dibuat supaya installer interaktif punya waktu
-           * memproses setiap pilihan.
-           */
-
-        });
+          // Windows OS
+          send(
+            os,
+            7000
+          );
 
 
-        stream.stderr.on("data", (data) => {
-          output += data.toString();
-        });
+          // Pilihan 1
+          send(
+            "1",
+            11000
+          );
 
 
-        stream.on("close", () => {
-
-          clearTimeout(timeout);
-
-          if (finished) return;
-
-          finished = true;
-
-          conn.end();
-
-          resolve({
-            success: true,
-            output,
-          });
-        });
+          // Pilihan 2
+          send(
+            "2",
+            15000
+          );
 
 
-        /*
-         * Jalankan installer
-         */
-
-        stream.write(
-          `bash <(curl -s ${INSTALLER_URL})\n`
-        );
+          // Password RDP
+          send(
+            rdpPassword,
+            19000
+          );
 
 
-        /*
-         * Karena installer bersifat interaktif,
-         * input dikirim berurutan.
-         */
+          // Pilihan 2
+          send(
+            "2",
+            23000
+          );
 
-        send(
-          INSTALLER_PASSWORD,
-          1500
-        );
 
-        send(
-          WINDOWS_OS[os].menu,
-          3500
-        );
+          // Port RDP
+          send(
+            rdpPort,
+            27000
+          );
 
-        send(
-          "1",
-          5500
-        );
 
-        send(
-          "2",
-          7500
-        );
+          // Confirm
+          send(
+            "y",
+            31000
+          );
 
-        send(
-          rdpPassword,
-          9500
-        );
-
-        send(
-          "2",
-          11500
-        );
-
-        send(
-          String(rdpPort),
-          13500
-        );
-
-        send(
-          "y",
-          15500
-        );
-
-      });
+        }
+      );
 
     });
 
 
-    conn.on("error", (err) => {
-
-      clearTimeout(timeout);
-
-      if (finished) return;
-
-      finished = true;
-
-      reject(err);
-
-    });
-
+    /* =====================================================
+       CONNECT SSH
+       ===================================================== */
 
     conn.connect({
+
       host,
+
       port: 22,
-      username,
-      password: sshPassword,
+
+      username:
+        username || "root",
+
+      password:
+        sshPassword,
 
       readyTimeout: 30000,
 
-      algorithms: {
-        serverHostKey: [
-          "ssh-ed25519",
-          "ecdsa-sha2-nistp256",
-          "rsa-sha2-512",
-          "rsa-sha2-256",
-        ],
-      },
+      keepaliveInterval: 10000,
+
+      keepaliveCountMax: 3,
+
     });
 
   });
 }
 
 
-/* ===============================
-   API ROUTE
-================================ */
+/* =========================================================
+   API
+   ========================================================= */
 
 module.exports = [
 
@@ -316,190 +375,323 @@ module.exports = [
     name: "RDP Installer",
 
     desc:
-      "Install Windows RDP automatically on a VPS",
+      "Install Windows RDP automatically on VPS",
 
     category: "RDP",
 
+    /*
+     * Parameter dibuat pendek supaya frontend
+     * API lu gampang membaca query parameter.
+     */
+
     path:
-      "/rdp/install?apikey=&provider=&host=&username=&ssh_password=&os=&rdp_password=&port=",
+      "/rdp/install?apikey=&provider=&host=&user=&pass=&os=&rdppass=&port=",
 
     async run(req, res) {
 
-      const {
-        apikey,
-        provider,
-        host,
-        username,
-        ssh_password,
-        os,
-        rdp_password,
-        port,
-      } = req.query;
-
-
-      /* ===============================
-         API KEY
-      ================================ */
-
-      if (
-        !apikey ||
-        !global.apikey ||
-        !global.apikey.includes(apikey)
-      ) {
-        return res.status(401).json({
-          status: false,
-          error: "Apikey invalid",
-        });
-      }
-
-
-      /* ===============================
-         REQUIRED
-      ================================ */
-
-      if (
-        !provider ||
-        !host ||
-        !ssh_password ||
-        !os ||
-        !rdp_password ||
-        !port
-      ) {
-        return res.status(400).json({
-          status: false,
-          error:
-            "provider, host, ssh_password, os, rdp_password and port are required",
-        });
-      }
-
-
-      /* ===============================
-         PROVIDER CHECK
-      ================================ */
-
-      if (!PROVIDERS[provider]) {
-
-        return res.status(400).json({
-          status: false,
-          error: "Invalid provider",
-
-          available_providers:
-            Object.keys(PROVIDERS),
-        });
-
-      }
-
-
-      /* ===============================
-         OS CHECK
-      ================================ */
-
-      if (!WINDOWS_OS[os]) {
-
-        return res.status(400).json({
-          status: false,
-          error: "Invalid Windows OS",
-
-          available_os:
-            Object.entries(WINDOWS_OS)
-              .map(([key, value]) => ({
-                id: key,
-                name: value.name,
-              })),
-        });
-
-      }
-
-
-      /* ===============================
-         PORT CHECK
-      ================================ */
-
-      if (!validPort(port)) {
-
-        return res.status(400).json({
-          status: false,
-          error:
-            "RDP port must be between 1 and 65535",
-        });
-
-      }
-
-
-      /* ===============================
-         RDP PASSWORD CHECK
-      ================================ */
-
-      if (!validPassword(rdp_password)) {
-
-        return res.status(400).json({
-          status: false,
-          error:
-            "RDP password must be 6-128 characters",
-        });
-
-      }
-
-
       try {
+
+        const {
+          apikey,
+          provider,
+          host,
+          user,
+          pass,
+          os,
+          rdppass,
+          port,
+        } = req.query;
+
+
+        /* =================================================
+           API KEY
+           ================================================= */
+
+        if (
+          !apikey ||
+          !global.apikey ||
+          !global.apikey.includes(apikey)
+        ) {
+
+          return res.status(401).json({
+
+            status: false,
+
+            error:
+              "Apikey invalid",
+
+          });
+
+        }
+
+
+        /* =================================================
+           REQUIRED
+           ================================================= */
+
+        if (!provider) {
+
+          return res.status(400).json({
+
+            status: false,
+
+            error:
+              "Provider is required",
+
+          });
+
+        }
+
+
+        if (!host) {
+
+          return res.status(400).json({
+
+            status: false,
+
+            error:
+              "VPS host/IP is required",
+
+          });
+
+        }
+
+
+        if (!pass) {
+
+          return res.status(400).json({
+
+            status: false,
+
+            error:
+              "SSH password is required",
+
+          });
+
+        }
+
+
+        if (!os) {
+
+          return res.status(400).json({
+
+            status: false,
+
+            error:
+              "Windows OS is required",
+
+          });
+
+        }
+
+
+        if (!rdppass) {
+
+          return res.status(400).json({
+
+            status: false,
+
+            error:
+              "RDP password is required",
+
+          });
+
+        }
+
+
+        if (!port) {
+
+          return res.status(400).json({
+
+            status: false,
+
+            error:
+              "RDP port is required",
+
+          });
+
+        }
+
+
+        /* =================================================
+           PROVIDER
+           ================================================= */
+
+        const providerKey =
+          String(provider).toLowerCase();
+
+        if (!PROVIDERS[providerKey]) {
+
+          return res.status(400).json({
+
+            status: false,
+
+            error:
+              "Invalid provider",
+
+            available_providers:
+              Object.entries(PROVIDERS).map(
+                ([id, name]) => ({
+                  id,
+                  name,
+                })
+              ),
+
+          });
+
+        }
+
+
+        /* =================================================
+           OS
+           ================================================= */
+
+        const osKey =
+          String(os);
+
+        if (!WINDOWS[osKey]) {
+
+          return res.status(400).json({
+
+            status: false,
+
+            error:
+              "Invalid Windows OS",
+
+            available_os:
+              Object.entries(WINDOWS).map(
+                ([id, value]) => ({
+                  id,
+                  name: value.name,
+                })
+              ),
+
+          });
+
+        }
+
+
+        /* =================================================
+           PORT
+           ================================================= */
+
+        if (!isValidPort(port)) {
+
+          return res.status(400).json({
+
+            status: false,
+
+            error:
+              "RDP port must be between 1 and 65535",
+
+          });
+
+        }
+
+
+        /* =================================================
+           RDP PASSWORD
+           ================================================= */
+
+        if (!isValidPassword(rdppass)) {
+
+          return res.status(400).json({
+
+            status: false,
+
+            error:
+              "RDP password must contain 6-128 characters",
+
+          });
+
+        }
+
+
+        /* =================================================
+           INSTALL
+           ================================================= */
 
         const result = await installRdp({
 
           host,
 
           username:
-            username || "root",
+            user || "root",
 
           sshPassword:
-            ssh_password,
+            pass,
 
-          os,
+          os:
+            osKey,
 
           rdpPassword:
-            rdp_password,
+            rdppass,
 
           rdpPort:
-            port,
+            Number(port),
 
         });
 
+
+        /* =================================================
+           SUCCESS
+           ================================================= */
 
         return res.status(200).json({
 
           status: true,
 
           message:
-            "RDP installer completed",
+            "RDP installation completed",
 
-          provider:
-            PROVIDERS[provider],
+          result: {
 
-          host,
+            provider:
+              PROVIDERS[providerKey],
 
-          os:
-            WINDOWS_OS[os].name,
+            host,
 
-          rdp_port:
-            Number(port),
+            username:
+              user || "root",
 
-          result,
+            os:
+              WINDOWS[osKey].name,
+
+            rdp_port:
+              Number(port),
+
+            installer:
+              "completed",
+
+            output:
+              result.output,
+
+          },
 
         });
 
       } catch (error) {
+
+        console.error(
+          "RDP INSTALLER ERROR:",
+          error
+        );
+
 
         return res.status(500).json({
 
           status: false,
 
           error:
-            error.message,
+            error.message ||
+            "RDP installer failed",
 
         });
 
       }
 
     },
+
   },
 
 ];
