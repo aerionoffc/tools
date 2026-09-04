@@ -1,16 +1,16 @@
 const { Client } = require("ssh2");
 
-/* =================================
-   RDP INSTALLER CONFIG
-================================= */
+/* =========================================
+   RDP INSTALLER
+========================================= */
 
 const INSTALLER_URL =
   "https://miror.aerion.web.id/auto.sh";
 
 
-/* =================================
+/* =========================================
    PROVIDER
-================================= */
+========================================= */
 
 const PROVIDERS = {
   "1": "DigitalOcean",
@@ -22,11 +22,11 @@ const PROVIDERS = {
 };
 
 
-/* =================================
-   WINDOWS OS
-================================= */
+/* =========================================
+   WINDOWS
+========================================= */
 
-const WINDOWS_OS = {
+const WINDOWS = {
   "1": "Windows 11 Pro",
   "2": "Windows 10 Pro",
   "3": "Windows Server 2012 R2",
@@ -37,58 +37,49 @@ const WINDOWS_OS = {
 };
 
 
-/* =================================
-   VALIDATE RDP PORT
-================================= */
+/* =========================================
+   VALIDATE PORT
+========================================= */
 
-function validPort(port) {
-  const p = Number(port);
+function isValidPort(port) {
+  const number = Number(port);
 
-  return Number.isInteger(p) &&
-    p >= 1 &&
-    p <= 65535;
+  return (
+    Number.isInteger(number) &&
+    number >= 1 &&
+    number <= 65535
+  );
 }
 
 
-/* =================================
-   INSTALL RDP
-================================= */
+/* =========================================
+   SSH INSTALLER
+========================================= */
 
-function installRDP({
+function runInstaller({
   host,
   sshPort,
-  sshPassword,
-  installerPassword,
+  vpsPassword,
+  os,
   rdpPassword,
-  rdpPort,
-  os
+  rdpPort
 }) {
+
   return new Promise((resolve, reject) => {
 
     const conn = new Client();
 
     let output = "";
-    let errorOutput = "";
+    let error = "";
 
     conn
       .on("ready", () => {
 
-        /*
-         * Download installer terlebih dahulu.
-         *
-         * Kita sengaja tidak menggunakan:
-         *
-         * bash <(curl ...)
-         *
-         * karena stdin installer harus kita kontrol
-         * untuk mengisi menu secara otomatis.
-         */
-
         const command = `
-          curl -fsSL '${INSTALLER_URL}' -o /tmp/aerion-rdp.sh &&
-          chmod +x /tmp/aerion-rdp.sh &&
-          bash /tmp/aerion-rdp.sh
-        `;
+curl -fsSL "${INSTALLER_URL}" -o /tmp/auto-rdp.sh &&
+chmod +x /tmp/auto-rdp.sh &&
+bash /tmp/auto-rdp.sh
+`;
 
         conn.exec(command, (err, stream) => {
 
@@ -98,53 +89,46 @@ function installRDP({
           }
 
           /*
-           * Jawaban menu installer.
+           * Urutan input auto.sh:
            *
-           * Sesuai flow yang lu kasih:
+           * 1. Password installer
+           * 2. OS
+           * 3. 1
+           * 4. 2
+           * 5. Password RDP
+           * 6. 2
+           * 7. Port RDP
+           * 8. Y
            *
-           * password installer
-           * OS
-           * 1
-           * 2
-           * password RDP
-           * 2
-           * port RDP
-           * y
+           * Password installer sesuai permintaan:
+           * NAZWA@123
            */
 
           const answers = [
-            installerPassword,
+            "NAZWA@123",
             os,
             "1",
             "2",
             rdpPassword,
             "2",
-            String(rdpPort),
+            rdpPort,
             "y"
           ];
 
-          let answerIndex = 0;
+          let index = 0;
 
-          /*
-           * Kirim input berdasarkan prompt.
-           *
-           * Ini lebih aman daripada memasukkan semua
-           * jawaban sekaligus karena prompt installer
-           * bisa memiliki jeda.
-           */
-
-          stream.on("data", (data) => {
+          stream.on("data", data => {
 
             const text = data.toString();
 
             output += text;
 
-            /*
-             * Prompt installer lu mungkin berbeda.
-             * Bagian ini dibuat cukup fleksibel.
-             */
-
             const lower = text.toLowerCase();
+
+            /*
+             * Tunggu prompt sebelum mengirim
+             * jawaban berikutnya.
+             */
 
             if (
               lower.includes("password") ||
@@ -156,32 +140,33 @@ function installRDP({
               lower.includes("[y/n]")
             ) {
 
-              if (answerIndex < answers.length) {
+              if (index < answers.length) {
 
                 stream.write(
-                  String(answers[answerIndex]) + "\n"
+                  String(answers[index]) + "\n"
                 );
 
-                answerIndex++;
+                index++;
+
               }
+
             }
+
           });
 
-
-          stream.stderr.on("data", (data) => {
-            errorOutput += data.toString();
+          stream.stderr.on("data", data => {
+            error += data.toString();
           });
 
-
-          stream.on("close", (code) => {
+          stream.on("close", code => {
 
             conn.end();
 
             resolve({
               success: code === 0,
-              exit_code: code,
+              code,
               output,
-              error: errorOutput
+              error
             });
 
           });
@@ -189,24 +174,28 @@ function installRDP({
         });
 
       })
+
       .on("error", reject)
+
       .connect({
         host,
         port: Number(sshPort),
         username: "root",
-        password: sshPassword,
+        password: vpsPassword,
         readyTimeout: 30000
       });
 
   });
+
 }
 
 
-/* =================================
+/* =========================================
    MODULE EXPORT
-================================= */
+========================================= */
 
 module.exports = [
+
   {
     name: "RDP Installer",
 
@@ -214,27 +203,32 @@ module.exports = [
 
     category: "Installer",
 
+    /*
+     * PENTING:
+     * Format ini yang akan dibaca frontend
+     * Laurence API untuk membuat input.
+     */
+
     path:
-      "/installer/rdp?apikey=&host=&ssh_password=&ssh_port=&provider=&os=&rdp_password=&rdp_port=&installer_password=",
+      "/installer/rdp?apikey=&host=&vps_password=&vps_port=&provider=&os=&rdp_password=&rdp_port=",
 
     async run(req, res) {
 
       const {
         apikey,
         host,
-        ssh_password,
-        ssh_port = 22,
+        vps_password,
+        vps_port = 22,
         provider,
         os,
         rdp_password,
-        rdp_port,
-        installer_password = "NAZWA@123"
+        rdp_port
       } = req.query;
 
 
-      /* ===============================
+      /* =====================================
          API KEY
-      =============================== */
+      ===================================== */
 
       if (
         !apikey ||
@@ -242,7 +236,7 @@ module.exports = [
         !global.apikey.includes(apikey)
       ) {
 
-        return res.status(401).json({
+        return res.json({
           status: false,
           error: "Apikey invalid"
         });
@@ -250,68 +244,124 @@ module.exports = [
       }
 
 
-      /* ===============================
-         REQUIRED
-      =============================== */
+      /* =====================================
+         HOST
+      ===================================== */
 
       if (!host) {
+
         return res.json({
           status: false,
           error: "VPS host/IP is required"
         });
+
       }
 
-      if (!ssh_password) {
+
+      /* =====================================
+         VPS PASSWORD
+      ===================================== */
+
+      if (!vps_password) {
+
         return res.json({
           status: false,
-          error: "VPS SSH password is required"
+          error: "VPS password is required"
         });
+
       }
 
+
+      /* =====================================
+         VPS PORT
+      ===================================== */
+
+      if (!isValidPort(vps_port)) {
+
+        return res.json({
+          status: false,
+          error: "Invalid VPS port"
+        });
+
+      }
+
+
+      /* =====================================
+         PROVIDER
+      ===================================== */
+
       if (!provider || !PROVIDERS[provider]) {
+
         return res.json({
           status: false,
           error: "Invalid provider"
         });
+
       }
 
-      if (!os || !WINDOWS_OS[os]) {
+
+      /* =====================================
+         OS
+      ===================================== */
+
+      if (!os || !WINDOWS[os]) {
+
         return res.json({
           status: false,
           error: "Invalid Windows OS"
         });
+
       }
 
+
+      /* =====================================
+         RDP PASSWORD
+      ===================================== */
+
       if (!rdp_password) {
+
         return res.json({
           status: false,
           error: "RDP password is required"
         });
+
       }
 
-      if (!validPort(rdp_port)) {
+
+      /* =====================================
+         RDP PORT
+      ===================================== */
+
+      if (!isValidPort(rdp_port)) {
+
         return res.json({
           status: false,
-          error:
-            "RDP port must be between 1 and 65535"
+          error: "RDP port must be between 1-65535"
         });
+
       }
 
 
-      /* ===============================
+      /* =====================================
          INSTALL
-      =============================== */
+      ===================================== */
 
       try {
 
-        const result = await installRDP({
+        const result = await runInstaller({
+
           host,
-          sshPort: ssh_port,
-          sshPassword: ssh_password,
-          installerPassword: installer_password,
+
+          sshPort: vps_port,
+
+          vpsPassword: vps_password,
+
+          os,
+
           rdpPassword: rdp_password,
-          rdpPort: rdp_port,
-          os
+
+          rdpPort: rdp_port
+
         });
 
 
@@ -322,16 +372,21 @@ module.exports = [
           status: result.success,
 
           message: result.success
-            ? "RDP installer completed"
-            : "RDP installer failed",
+            ? "RDP installation completed"
+            : "RDP installation failed",
 
           provider: PROVIDERS[provider],
 
-          os: WINDOWS_OS[os],
+          os: WINDOWS[os],
 
-          rdp_port: Number(rdp_port),
+          vps: {
+            host,
+            port: Number(vps_port)
+          },
 
-          exit_code: result.exit_code,
+          rdp: {
+            port: Number(rdp_port)
+          },
 
           output: result.output,
 
@@ -339,18 +394,21 @@ module.exports = [
 
         });
 
-      } catch (error) {
+
+      } catch (err) {
 
         return res.status(500).json({
 
           status: false,
 
-          error: error.message
+          error: err.message
 
         });
 
       }
 
     }
+
   }
+
 ];
