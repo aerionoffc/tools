@@ -1,325 +1,250 @@
 const { Client } = require("ssh2");
 
-/* ===============================
+/* =================================
    RDP INSTALLER CONFIG
-================================ */
+================================= */
 
 const INSTALLER_URL =
   "https://miror.aerion.web.id/auto.sh";
 
-const INSTALLER_PASSWORD =
-  process.env.RDP_INSTALLER_PASSWORD || "NAZWA@123";
+
+/* =================================
+   PROVIDER
+================================= */
+
+const PROVIDERS = {
+  "1": "DigitalOcean",
+  "2": "Linode",
+  "3": "Vultr",
+  "4": "UpCloud",
+  "5": "OVHcloud",
+  "6": "Other Cloud"
+};
 
 
-/* ===============================
-   RDP INSTALLER
-================================ */
+/* =================================
+   WINDOWS OS
+================================= */
 
-async function installRdp({
+const WINDOWS_OS = {
+  "1": "Windows 11 Pro",
+  "2": "Windows 10 Pro",
+  "3": "Windows Server 2012 R2",
+  "4": "Windows Server 2016",
+  "5": "Windows Server 2019",
+  "6": "Windows Server 2022",
+  "7": "Windows Server 2025"
+};
+
+
+/* =================================
+   VALIDATE RDP PORT
+================================= */
+
+function validPort(port) {
+  const p = Number(port);
+
+  return Number.isInteger(p) &&
+    p >= 1 &&
+    p <= 65535;
+}
+
+
+/* =================================
+   INSTALL RDP
+================================= */
+
+function installRDP({
   host,
-  username,
+  sshPort,
   sshPassword,
-  os,
+  installerPassword,
   rdpPassword,
-  rdpPort
+  rdpPort,
+  os
 }) {
-
   return new Promise((resolve, reject) => {
 
     const conn = new Client();
 
     let output = "";
-    let finished = false;
+    let errorOutput = "";
 
-    const timeout = setTimeout(() => {
+    conn
+      .on("ready", () => {
 
-      if (finished) return;
+        /*
+         * Download installer terlebih dahulu.
+         *
+         * Kita sengaja tidak menggunakan:
+         *
+         * bash <(curl ...)
+         *
+         * karena stdin installer harus kita kontrol
+         * untuk mengisi menu secara otomatis.
+         */
 
-      finished = true;
+        const command = `
+          curl -fsSL '${INSTALLER_URL}' -o /tmp/aerion-rdp.sh &&
+          chmod +x /tmp/aerion-rdp.sh &&
+          bash /tmp/aerion-rdp.sh
+        `;
 
-      conn.end();
-
-      reject(
-        new Error("Installer timeout")
-      );
-
-    }, 30 * 60 * 1000);
-
-
-    conn.on("ready", () => {
-
-      conn.shell(
-        {
-          term: "xterm",
-          cols: 120,
-          rows: 40
-        },
-        (err, stream) => {
+        conn.exec(command, (err, stream) => {
 
           if (err) {
-
-            clearTimeout(timeout);
             conn.end();
-
             return reject(err);
           }
 
+          /*
+           * Jawaban menu installer.
+           *
+           * Sesuai flow yang lu kasih:
+           *
+           * password installer
+           * OS
+           * 1
+           * 2
+           * password RDP
+           * 2
+           * port RDP
+           * y
+           */
 
-          /* ===============================
-             OUTPUT
-          ================================= */
+          const answers = [
+            installerPassword,
+            os,
+            "1",
+            "2",
+            rdpPassword,
+            "2",
+            String(rdpPort),
+            "y"
+          ];
 
-          stream.on("data", data => {
+          let answerIndex = 0;
+
+          /*
+           * Kirim input berdasarkan prompt.
+           *
+           * Ini lebih aman daripada memasukkan semua
+           * jawaban sekaligus karena prompt installer
+           * bisa memiliki jeda.
+           */
+
+          stream.on("data", (data) => {
 
             const text = data.toString();
 
             output += text;
 
-            console.log(
-              `[RDP ${host}] ${text}`
-            );
+            /*
+             * Prompt installer lu mungkin berbeda.
+             * Bagian ini dibuat cukup fleksibel.
+             */
 
+            const lower = text.toLowerCase();
+
+            if (
+              lower.includes("password") ||
+              lower.includes("select") ||
+              lower.includes("choose") ||
+              lower.includes("option") ||
+              lower.includes("port") ||
+              lower.includes("(y/n)") ||
+              lower.includes("[y/n]")
+            ) {
+
+              if (answerIndex < answers.length) {
+
+                stream.write(
+                  String(answers[answerIndex]) + "\n"
+                );
+
+                answerIndex++;
+              }
+            }
           });
 
 
-          stream.stderr.on("data", data => {
-
-            output += data.toString();
-
+          stream.stderr.on("data", (data) => {
+            errorOutput += data.toString();
           });
 
 
-          /* ===============================
-             CLOSED
-          ================================= */
-
-          stream.on("close", () => {
-
-            if (finished) return;
-
-            finished = true;
-
-            clearTimeout(timeout);
+          stream.on("close", (code) => {
 
             conn.end();
 
             resolve({
-              output
+              success: code === 0,
+              exit_code: code,
+              output,
+              error: errorOutput
             });
 
           });
 
+        });
 
-          /* ===============================
-             SEND
-          ================================= */
-
-          const send = (value, delay) => {
-
-            setTimeout(() => {
-
-              if (finished) return;
-
-              stream.write(
-                String(value) + "\n"
-              );
-
-            }, delay);
-
-          };
-
-
-          /* ===============================
-             RUN INSTALLER
-          ================================= */
-
-          stream.write(
-            `bash <(curl -fsSL ${INSTALLER_URL})\n`
-          );
-
-
-          /*
-           * Password installer
-           */
-
-          send(
-            INSTALLER_PASSWORD,
-            3000
-          );
-
-
-          /*
-           * Windows OS
-           *
-           * 1 = Windows 11 Pro
-           * 2 = Windows 10 Pro
-           * 3 = Server 2012 R2
-           * 4 = Server 2016
-           * 5 = Server 2019
-           * 6 = Server 2022
-           * 7 = Server 2025
-           */
-
-          send(
-            os,
-            7000
-          );
-
-
-          /*
-           * Pilih 1
-           */
-
-          send(
-            "1",
-            11000
-          );
-
-
-          /*
-           * Pilih 2
-           */
-
-          send(
-            "2",
-            15000
-          );
-
-
-          /*
-           * Password RDP
-           */
-
-          send(
-            rdpPassword,
-            19000
-          );
-
-
-          /*
-           * Pilih 2
-           */
-
-          send(
-            "2",
-            23000
-          );
-
-
-          /*
-           * Port RDP
-           */
-
-          send(
-            rdpPort,
-            27000
-          );
-
-
-          /*
-           * Confirm
-           */
-
-          send(
-            "y",
-            31000
-          );
-
-        }
-      );
-
-    });
-
-
-    conn.on("error", err => {
-
-      if (finished) return;
-
-      finished = true;
-
-      clearTimeout(timeout);
-
-      reject(err);
-
-    });
-
-
-    /* ===============================
-       SSH CONNECT
-    ================================= */
-
-    conn.connect({
-
-      host,
-
-      port: 22,
-
-      username:
-        username || "root",
-
-      password:
-        sshPassword,
-
-      readyTimeout: 30000,
-
-      keepaliveInterval: 10000,
-
-      keepaliveCountMax: 3
-
-    });
+      })
+      .on("error", reject)
+      .connect({
+        host,
+        port: Number(sshPort),
+        username: "root",
+        password: sshPassword,
+        readyTimeout: 30000
+      });
 
   });
-
 }
 
 
-/* ===============================
+/* =================================
    MODULE EXPORT
-================================ */
+================================= */
 
 module.exports = [
-
   {
     name: "RDP Installer",
 
-    desc:
-      "Install Windows RDP automatically on VPS",
+    desc: "Install Windows RDP automatically",
 
-    category: "RDP",
+    category: "Installer",
 
     path:
-      "/rdp/install?apikey=&provider=&host=&user=&pass=&os=&rdppass=&port=",
+      "/installer/rdp?apikey=&host=&ssh_password=&ssh_port=&provider=&os=&rdp_password=&rdp_port=&installer_password=",
 
     async run(req, res) {
 
       const {
         apikey,
-        provider,
         host,
-        user,
-        pass,
+        ssh_password,
+        ssh_port = 22,
+        provider,
         os,
-        rdppass,
-        port
+        rdp_password,
+        rdp_port,
+        installer_password = "NAZWA@123"
       } = req.query;
 
 
       /* ===============================
          API KEY
-      ================================= */
+      =============================== */
 
       if (
         !apikey ||
+        !global.apikey ||
         !global.apikey.includes(apikey)
       ) {
 
-        return res.json({
-
+        return res.status(401).json({
           status: false,
-
-          error:
-            "Apikey invalid"
-
+          error: "Apikey invalid"
         });
 
       }
@@ -327,240 +252,90 @@ module.exports = [
 
       /* ===============================
          REQUIRED
-      ================================= */
-
-      if (!provider) {
-
-        return res.json({
-
-          status: false,
-
-          error:
-            "Provider is required"
-
-        });
-
-      }
-
+      =============================== */
 
       if (!host) {
-
         return res.json({
-
           status: false,
-
-          error:
-            "VPS host is required"
-
+          error: "VPS host/IP is required"
         });
-
       }
 
-
-      if (!pass) {
-
+      if (!ssh_password) {
         return res.json({
-
           status: false,
-
-          error:
-            "SSH password is required"
-
+          error: "VPS SSH password is required"
         });
-
       }
 
-
-      if (!os) {
-
+      if (!provider || !PROVIDERS[provider]) {
         return res.json({
-
           status: false,
-
-          error:
-            "OS is required"
-
+          error: "Invalid provider"
         });
-
       }
 
-
-      if (!rdppass) {
-
+      if (!os || !WINDOWS_OS[os]) {
         return res.json({
-
           status: false,
-
-          error:
-            "RDP password is required"
-
+          error: "Invalid Windows OS"
         });
-
       }
 
-
-      if (!port) {
-
+      if (!rdp_password) {
         return res.json({
-
           status: false,
-
-          error:
-            "RDP port is required"
-
+          error: "RDP password is required"
         });
-
       }
 
-
-      /* ===============================
-         VALID PROVIDER
-      ================================= */
-
-      const providers = [
-        "digitalocean",
-        "linode",
-        "vultr",
-        "upcloud",
-        "ovhcloud",
-        "other"
-      ];
-
-      if (!providers.includes(
-        provider.toLowerCase()
-      )) {
-
+      if (!validPort(rdp_port)) {
         return res.json({
-
           status: false,
-
           error:
-            "Invalid provider",
-
-          providers
-
+            "RDP port must be between 1 and 65535"
         });
-
-      }
-
-
-      /* ===============================
-         VALID OS
-      ================================= */
-
-      const osList = {
-
-        "1": "Windows 11 Pro",
-
-        "2": "Windows 10 Pro",
-
-        "3": "Windows Server 2012 R2",
-
-        "4": "Windows Server 2016",
-
-        "5": "Windows Server 2019",
-
-        "6": "Windows Server 2022",
-
-        "7": "Windows Server 2025"
-
-      };
-
-
-      if (!osList[os]) {
-
-        return res.json({
-
-          status: false,
-
-          error:
-            "Invalid Windows OS",
-
-          os: osList
-
-        });
-
-      }
-
-
-      /* ===============================
-         VALID PORT
-      ================================= */
-
-      const rdpPort =
-        Number(port);
-
-      if (
-        !Number.isInteger(rdpPort) ||
-        rdpPort < 1 ||
-        rdpPort > 65535
-      ) {
-
-        return res.json({
-
-          status: false,
-
-          error:
-            "Port must be between 1 and 65535"
-
-        });
-
       }
 
 
       /* ===============================
          INSTALL
-      ================================= */
+      =============================== */
 
       try {
 
-        const result =
-          await installRdp({
-
-            host,
-
-            username:
-              user || "root",
-
-            sshPassword:
-              pass,
-
-            os,
-
-            rdpPassword:
-              rdppass,
-
-            rdpPort
-
-          });
+        const result = await installRDP({
+          host,
+          sshPort: ssh_port,
+          sshPassword: ssh_password,
+          installerPassword: installer_password,
+          rdpPassword: rdp_password,
+          rdpPort: rdp_port,
+          os
+        });
 
 
-        return res.json({
+        return res.status(
+          result.success ? 200 : 500
+        ).json({
 
-          status: true,
+          status: result.success,
 
-          message:
-            "RDP installer started/completed",
+          message: result.success
+            ? "RDP installer completed"
+            : "RDP installer failed",
 
-          result: {
+          provider: PROVIDERS[provider],
 
-            provider,
+          os: WINDOWS_OS[os],
 
-            host,
+          rdp_port: Number(rdp_port),
 
-            username:
-              user || "root",
+          exit_code: result.exit_code,
 
-            os:
-              osList[os],
+          output: result.output,
 
-            rdp_port:
-              rdpPort,
-
-            output:
-              result.output
-
-          }
+          error: result.error || null
 
         });
 
@@ -570,15 +345,12 @@ module.exports = [
 
           status: false,
 
-          error:
-            error.message
+          error: error.message
 
         });
 
       }
 
     }
-
   }
-
 ];
